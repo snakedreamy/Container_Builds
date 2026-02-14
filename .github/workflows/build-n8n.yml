@@ -34,9 +34,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 通过 GitHub API 获取最新 release tag_name
-          # 返回一般是类似 "2.10.0"
-          N8N_VERSION="$(
+          RAW_TAG="$(
             curl -fsSL \
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
@@ -44,11 +42,23 @@ jobs:
             | jq -r '.tag_name'
           )"
 
-          # 有的仓库 tag 可能带 v 前缀，这里统一去掉 v
-          N8N_VERSION="${N8N_VERSION#v}"
+          echo "上游返回的原始 tag_name：${RAW_TAG}"
+
+          # 处理常见格式：
+          # 1) v2.7.5 -> 2.7.5
+          # 2) n8n@2.7.5 -> 2.7.5
+          # 3) 其他类似 xxx@2.7.5 -> 2.7.5（取 @ 后半段）
+          N8N_VERSION="${RAW_TAG#v}"
+          N8N_VERSION="${N8N_VERSION##*@}"   # 如果包含 @，取最后一个 @ 之后的内容
+
+          # 最后做一次基本校验：必须是 x.y.z
+          if ! echo "${N8N_VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "解析后的版本号不符合预期：${N8N_VERSION}（原始：${RAW_TAG}）" >&2
+            exit 1
+          fi
 
           echo "n8n_version=${N8N_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "上游最新 n8n 版本：${N8N_VERSION}"
+          echo "解析后的 n8n 版本号：${N8N_VERSION}"
 
       # 2) 登录 GHCR
       - uses: docker/login-action@v3
