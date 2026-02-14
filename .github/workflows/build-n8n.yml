@@ -1,17 +1,14 @@
-name: 构建并发布 n8n 镜像
+name: 构建并发布 n8n 镜像（自动跟随底座版本）
 
 on:
-  # 你改了 n8n 镜像相关文件才触发（README.md 不会触发，因为不在 paths 里）
   push:
     branches: [ "main" ]
     paths:
       - "images/n8n/**"
       - ".github/workflows/build-n8n.yml"
 
-  # 手动触发
   workflow_dispatch:
 
-  # 定时检查上游 n8n 是否发布新版本
   schedule:
     - cron: "0 */6 * * *"  # 每 6 小时一次（UTC）
 
@@ -49,7 +46,6 @@ jobs:
           N8N_VERSION="${RAW_TAG#v}"
           N8N_VERSION="${N8N_VERSION##*@}"
 
-          # 基本校验：必须是 x.y.z
           if ! echo "${N8N_VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "解析后的版本号不符合预期：${N8N_VERSION}（原始：${RAW_TAG}）" >&2
             exit 1
@@ -65,12 +61,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 3) 如果 GHCR 已经存在该版本 tag，就跳过构建（避免 schedule 重复构建）
+      # 3) 如果 GHCR 已有该版本 tag，就跳过构建
       - name: 如果 GHCR 已有该版本则跳过
         id: check
         run: |
           set -euo pipefail
           IMAGE="ghcr.io/${{ github.repository_owner }}/n8n:${{ steps.upstream.outputs.n8n_version }}"
+
           if docker manifest inspect "${IMAGE}" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "GHCR 已存在：${IMAGE}，跳过构建"
@@ -79,7 +76,45 @@ jobs:
             echo "GHCR 不存在：${IMAGE}，将执行构建"
           fi
 
-      # 4) 多架构构建需要 QEMU（仅在要构建时启用）
+      # 4) 探测 n8n 基础镜像的 Alpine VERSION_ID（让 builder 跟随底座版本）
+      - name: 探测 n8n 基础镜像的 Alpine 版本号
+        id: detect
+        if: steps.check.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+
+          IMG="docker.n8n.io/n8nio/n8n:${{ steps.upstream.outputs.n8n_version }}"
+          echo "准备探测镜像：${IMG}"
+
+          OS_INFO="$(
+            docker run --rm "${IMG}" sh -lc '. /etc/os-release; echo "${ID:-} ${VERSION_ID:-}"' 2>/dev/null || true
+          )"
+
+          if [ -z "${OS_INFO}" ]; then
+            echo "无法读取 /etc/os-release（可能镜像没有 /bin/sh 或结构变化）" >&2
+            exit 1
+          fi
+
+          OS_ID="$(echo "${OS_INFO}" | awk '{print $1}')"
+          OS_VER="$(echo "${OS_INFO}" | awk '{print $2}')"
+
+          echo "探测到：ID=${OS_ID} VERSION_ID=${OS_VER}"
+
+          # 你目前的镜像是 Docker Hardened Images (Alpine)
+          if [ "${OS_ID}" != "alpine" ]; then
+            echo "基础镜像不是 alpine（ID=${OS_ID}），当前 git-builder 策略需要调整。" >&2
+            exit 1
+          fi
+
+          if ! echo "${OS_VER}" | grep -Eq '^[0-9]+\.[0-9]+$'; then
+            echo "VERSION_ID 格式异常：${OS_VER}" >&2
+            exit 1
+          fi
+
+          echo "alpine_version=${OS_VER}" >> "$GITHUB_OUTPUT"
+          echo "alpine_version=${OS_VER}"
+
+      # 5) 多架构构建需要 QEMU + buildx
       - name: 启用 QEMU（跨架构构建）
         if: steps.check.outputs.exists != 'true'
         uses: docker/setup-qemu-action@v3
@@ -87,18 +122,18 @@ jobs:
       - uses: docker/setup-buildx-action@v3
         if: steps.check.outputs.exists != 'true'
 
-      # 5) 构建并推送（同时发布 amd64 + arm64）
+      # 6) 构建并推送（多架构）
       - name: 构建并推送 n8n 镜像（多架构）
         if: steps.check.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
-          # 建议把构建上下文收敛到镜像目录（更干净）
           context: images/n8n
           file: images/n8n/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
           build-args: |
             N8N_VERSION=${{ steps.upstream.outputs.n8n_version }}
+            ALPINE_VERSION=${{ steps.detect.outputs.alpine_version }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/n8n:latest
             ghcr.io/${{ github.repository_owner }}/n8n:${{ steps.upstream.outputs.n8n_version }}

@@ -28,17 +28,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Docker Hub tag 详情 API（latest）
           LATEST_JSON="$(curl -fsSL "https://hub.docker.com/v2/repositories/n8nio/runners/tags/latest")"
 
-          # 优先取 linux/amd64 的 digest 作为“更新 key”
+          # 优先取 linux/amd64 digest 作为“变化 key”
           LATEST_DIGEST="$(
             echo "${LATEST_JSON}" \
             | jq -r '( .images[] | select(.os=="linux" and .architecture=="amd64") | .digest ) // empty' \
             | head -n 1
           )"
 
-          # 如果没取到，就取第一个
           if [ -z "${LATEST_DIGEST}" ] || [ "${LATEST_DIGEST}" = "null" ]; then
             LATEST_DIGEST="$(echo "${LATEST_JSON}" | jq -r '.images[0].digest')"
           fi
@@ -63,12 +61,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 3) 如果 GHCR 已经存在这个 digest 标识的 tag，就跳过
+      # 3) 如果 GHCR 已有该 digest 版本则跳过
       - name: 如果 GHCR 已有该 digest 版本则跳过
         id: check
         run: |
           set -euo pipefail
           IMAGE="ghcr.io/${{ github.repository_owner }}/n8n-runner:digest-${{ steps.upstream.outputs.short_digest }}"
+
           if docker manifest inspect "${IMAGE}" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "GHCR 已存在：${IMAGE}，跳过构建"
@@ -77,7 +76,7 @@ jobs:
             echo "GHCR 不存在：${IMAGE}，将执行构建"
           fi
 
-      # 4) 多架构构建：启用 QEMU
+      # 4) 多架构构建需要 QEMU + buildx
       - name: 启用 QEMU（跨架构构建）
         if: steps.check.outputs.exists != 'true'
         uses: docker/setup-qemu-action@v3
@@ -85,12 +84,12 @@ jobs:
       - uses: docker/setup-buildx-action@v3
         if: steps.check.outputs.exists != 'true'
 
-      # 5) 构建并推送（以 latest 为基准；多架构）
+      # 5) 构建并推送（多架构）
       - name: 构建并推送 n8n-runner 镜像（多架构）
         if: steps.check.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
-          # 关键修复：context 指向 images/n8n-runner，COPY 才能找到 n8n-task-runners.json
+          # 关键：context 指向镜像目录，这样 COPY 才能找到 n8n-task-runners.json
           context: images/n8n-runner
           file: images/n8n-runner/Dockerfile
           push: true

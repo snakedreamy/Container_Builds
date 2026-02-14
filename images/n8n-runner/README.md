@@ -2,8 +2,11 @@
 
 基于官方 `n8nio/runners` 扩展：
 
-- JS：moment、uuid
-- Python：numpy、pandas
-- 同时配置 allowlist，保证 Code 节点可以使用这些包
+- JavaScript runner：安装 `moment`、`uuid`
+- Python runner：安装 `numpy`、`pandas`
+- 同时写入 allowlist 配置，确保 Code 节点可用这些包
 
-构建由 GitHub Actions 自动追随上游 `n8nio/runners:latest`（稳定最新版）。
+构建策略：
+- 以 `n8nio/runners:latest` 为稳定最新版基准
+- 自动构建并推送到 GHCR
+- 支持 linux/amd64 与 linux/arm64
