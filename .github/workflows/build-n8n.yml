@@ -20,23 +20,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1. 获取 n8n 官方最新稳定版版本号
       - name: 获取上游 n8n 最新版本号
         id: upstream_version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # 通过 GitHub API 获取最新 Release Tag (比解析 HTML 或 Docker tag 更靠谱)
           RAW_TAG=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" https://api.github.com/repos/n8n-io/n8n/releases/latest | jq -r '.tag_name')
-          
-          # 清洗版本号 (去掉 n8n@ 前缀或 v 前缀, 只要纯数字版本如 2.7.5)
           VERSION=$(echo "${RAW_TAG}" | sed -E 's/^v//; s/^n8n@//')
-          
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "✅ 探测到最新版本: ${VERSION}"
 
-      # 2. 获取该版本在 GHCR 的 Digest (确保上游镜像已推送到 GHCR)
+      # --- 修复点：使用 skopeo 检查上游镜像是否存在 ---
       - name: 获取上游镜像 Digest
         id: upstream_digest
         run: |
@@ -46,14 +41,14 @@ jobs:
           
           echo "正在检查上游镜像: ${UPSTREAM_IMAGE}"
           
-          # 尝试获取 Digest
-          if ! DIGEST=$(docker manifest inspect "${UPSTREAM_IMAGE}" -v 2>/dev/null | jq -r '.Descriptor.digest'); then
+          # 使用 skopeo 检查是否存在
+          if ! DIGEST=$(skopeo inspect docker://${UPSTREAM_IMAGE} --format '{{.Digest}}' 2>/dev/null); then
              echo "⚠️ 上游 GHCR 尚未同步版本 ${VERSION}，跳过本次构建"
-             echo "exists=true" >> "$GITHUB_OUTPUT" # 伪装成已存在，以跳过后续步骤
+             echo "exists=true" >> "$GITHUB_OUTPUT" 
              exit 0
           fi
           
-          echo "exists=false" >> "$GITHUB_OUTPUT" # 标记为需要进一步检查
+          echo "exists=false" >> "$GITHUB_OUTPUT"
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "✅ 上游 Digest: ${DIGEST}"
 
@@ -63,7 +58,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 3. 检查我们自己的 GHCR 是否已经构建过这个版本
       - name: 检查本地是否已存在该版本
         id: check
         if: steps.upstream_digest.outputs.exists == 'false'
@@ -84,7 +78,6 @@ jobs:
       - uses: docker/setup-buildx-action@v3
         if: steps.check.outputs.exists == 'false' && steps.upstream_digest.outputs.exists == 'false'
 
-      # 4. 构建并推送
       - name: 构建并推送 n8n
         if: steps.check.outputs.exists == 'false' && steps.upstream_digest.outputs.exists == 'false'
         uses: docker/build-push-action@v6
@@ -93,7 +86,6 @@ jobs:
           file: images/n8n/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          # 传入版本号给 Dockerfile
           build-args: |
             N8N_VERSION=${{ steps.upstream_version.outputs.version }}
           tags: |
