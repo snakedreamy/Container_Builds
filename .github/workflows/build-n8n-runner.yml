@@ -6,8 +6,6 @@ on:
     paths:
       - "images/n8n-runner/**"
       - ".github/workflows/build-n8n-runner.yml"
-    paths-ignore:
-      - "**/*.md"
 
   workflow_dispatch:
 

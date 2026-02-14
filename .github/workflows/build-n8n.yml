@@ -7,8 +7,6 @@ on:
     paths:
       - "images/n8n/**"
       - ".github/workflows/build-n8n.yml"
-    paths-ignore:
-      - "**/*.md"
 
   # 允许手动触发
   workflow_dispatch:
