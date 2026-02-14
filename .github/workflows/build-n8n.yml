@@ -1,4 +1,4 @@
-name: 构建并发布 n8n 镜像（自动跟随底座版本）
+name: 构建并发布 n8n 镜像 (含中文字体)
 
 on:
   push:
@@ -6,11 +6,9 @@ on:
     paths:
       - "images/n8n/**"
       - ".github/workflows/build-n8n.yml"
-
   workflow_dispatch:
-
   schedule:
-    - cron: "0 */6 * * *"  # 每 6 小时一次（UTC）
+    - cron: "0 */6 * * *"
 
 permissions:
   contents: read
@@ -22,119 +20,82 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1) 获取上游 n8n 最新稳定 release 版本号
+      # 1. 获取 n8n 官方最新稳定版版本号
       - name: 获取上游 n8n 最新版本号
-        id: upstream
+        id: upstream_version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # 通过 GitHub API 获取最新 Release Tag (比解析 HTML 或 Docker tag 更靠谱)
+          RAW_TAG=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" https://api.github.com/repos/n8n-io/n8n/releases/latest | jq -r '.tag_name')
+          
+          # 清洗版本号 (去掉 n8n@ 前缀或 v 前缀, 只要纯数字版本如 2.7.5)
+          VERSION=$(echo "${RAW_TAG}" | sed -E 's/^v//; s/^n8n@//')
+          
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "✅ 探测到最新版本: ${VERSION}"
 
-          RAW_TAG="$(
-            curl -fsSL \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -H "Accept: application/vnd.github+json" \
-              https://api.github.com/repos/n8n-io/n8n/releases/latest \
-            | jq -r '.tag_name'
-          )"
-
-          echo "上游返回原始 tag_name：${RAW_TAG}"
-
-          # 清洗 tag：
-          # - v2.7.5 -> 2.7.5
-          # - n8n@2.7.5 -> 2.7.5
-          N8N_VERSION="${RAW_TAG#v}"
-          N8N_VERSION="${N8N_VERSION##*@}"
-
-          if ! echo "${N8N_VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "解析后的版本号不符合预期：${N8N_VERSION}（原始：${RAW_TAG}）" >&2
-            exit 1
+      # 2. 获取该版本在 GHCR 的 Digest (确保上游镜像已推送到 GHCR)
+      - name: 获取上游镜像 Digest
+        id: upstream_digest
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.upstream_version.outputs.version }}"
+          UPSTREAM_IMAGE="ghcr.io/n8n-io/n8n:${VERSION}"
+          
+          echo "正在检查上游镜像: ${UPSTREAM_IMAGE}"
+          
+          # 尝试获取 Digest
+          if ! DIGEST=$(docker manifest inspect "${UPSTREAM_IMAGE}" -v 2>/dev/null | jq -r '.Descriptor.digest'); then
+             echo "⚠️ 上游 GHCR 尚未同步版本 ${VERSION}，跳过本次构建"
+             echo "exists=true" >> "$GITHUB_OUTPUT" # 伪装成已存在，以跳过后续步骤
+             exit 0
           fi
+          
+          echo "exists=false" >> "$GITHUB_OUTPUT" # 标记为需要进一步检查
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "✅ 上游 Digest: ${DIGEST}"
 
-          echo "n8n_version=${N8N_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "解析后的 n8n_version：${N8N_VERSION}"
-
-      # 2) 登录 GHCR
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 3) 如果 GHCR 已有该版本 tag，就跳过构建
-      - name: 如果 GHCR 已有该版本则跳过
+      # 3. 检查我们自己的 GHCR 是否已经构建过这个版本
+      - name: 检查本地是否已存在该版本
         id: check
+        if: steps.upstream_digest.outputs.exists == 'false'
         run: |
-          set -euo pipefail
-          IMAGE="ghcr.io/${{ github.repository_owner }}/n8n:${{ steps.upstream.outputs.n8n_version }}"
-
-          if docker manifest inspect "${IMAGE}" >/dev/null 2>&1; then
+          VERSION="${{ steps.upstream_version.outputs.version }}"
+          MY_IMAGE="ghcr.io/${{ github.repository_owner }}/n8n:${VERSION}"
+          
+          if docker manifest inspect "${MY_IMAGE}" > /dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "GHCR 已存在：${IMAGE}，跳过构建"
+            echo "🎉 版本 ${VERSION} 已存在，跳过构建"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "GHCR 不存在：${IMAGE}，将执行构建"
+            echo "🚀 准备构建版本 ${VERSION}"
           fi
 
-      # 4) 探测 n8n 基础镜像的 Alpine VERSION_ID（让 builder 跟随底座版本）
-      - name: 探测 n8n 基础镜像的 Alpine 版本号
-        id: detect
-        if: steps.check.outputs.exists != 'true'
-        run: |
-          set -euo pipefail
-
-          IMG="docker.n8n.io/n8nio/n8n:${{ steps.upstream.outputs.n8n_version }}"
-          echo "准备探测镜像：${IMG}"
-
-          OS_INFO="$(
-            docker run --rm "${IMG}" sh -lc '. /etc/os-release; echo "${ID:-} ${VERSION_ID:-}"' 2>/dev/null || true
-          )"
-
-          if [ -z "${OS_INFO}" ]; then
-            echo "无法读取 /etc/os-release（可能镜像没有 /bin/sh 或结构变化）" >&2
-            exit 1
-          fi
-
-          OS_ID="$(echo "${OS_INFO}" | awk '{print $1}')"
-          OS_VER="$(echo "${OS_INFO}" | awk '{print $2}')"
-
-          echo "探测到：ID=${OS_ID} VERSION_ID=${OS_VER}"
-
-          # 你目前的镜像是 Docker Hardened Images (Alpine)
-          if [ "${OS_ID}" != "alpine" ]; then
-            echo "基础镜像不是 alpine（ID=${OS_ID}），当前 git-builder 策略需要调整。" >&2
-            exit 1
-          fi
-
-          if ! echo "${OS_VER}" | grep -Eq '^[0-9]+\.[0-9]+$'; then
-            echo "VERSION_ID 格式异常：${OS_VER}" >&2
-            exit 1
-          fi
-
-          echo "alpine_version=${OS_VER}" >> "$GITHUB_OUTPUT"
-          echo "alpine_version=${OS_VER}"
-
-      # 5) 多架构构建需要 QEMU + buildx
-      - name: 启用 QEMU（跨架构构建）
-        if: steps.check.outputs.exists != 'true'
-        uses: docker/setup-qemu-action@v3
-
+      - uses: docker/setup-qemu-action@v3
+        if: steps.check.outputs.exists == 'false' && steps.upstream_digest.outputs.exists == 'false'
       - uses: docker/setup-buildx-action@v3
-        if: steps.check.outputs.exists != 'true'
+        if: steps.check.outputs.exists == 'false' && steps.upstream_digest.outputs.exists == 'false'
 
-      # 6) 构建并推送（多架构）
-      - name: 构建并推送 n8n 镜像（多架构）
-        if: steps.check.outputs.exists != 'true'
+      # 4. 构建并推送
+      - name: 构建并推送 n8n
+        if: steps.check.outputs.exists == 'false' && steps.upstream_digest.outputs.exists == 'false'
         uses: docker/build-push-action@v6
         with:
           context: images/n8n
           file: images/n8n/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
+          # 传入版本号给 Dockerfile
           build-args: |
-            N8N_VERSION=${{ steps.upstream.outputs.n8n_version }}
-            ALPINE_VERSION=${{ steps.detect.outputs.alpine_version }}
+            N8N_VERSION=${{ steps.upstream_version.outputs.version }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/n8n:latest
-            ghcr.io/${{ github.repository_owner }}/n8n:${{ steps.upstream.outputs.n8n_version }}
-            ghcr.io/${{ github.repository_owner }}/n8n:sha-${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/n8n:${{ steps.upstream_version.outputs.version }}
