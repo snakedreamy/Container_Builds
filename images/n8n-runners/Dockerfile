@@ -9,16 +9,13 @@ USER root
 # --- JavaScript Runner 扩展 ---
 # 安装常用库，方便 Function 节点调用
 RUN cd /opt/runners/task-runner-javascript && \
-    pnpm add moment uuid lodash
+    pnpm add moment uuid lodash puppeteer-core
 
 # --- Python Runner 扩展 ---
 # 安装数据处理常用库
 RUN cd /opt/runners/task-runner-python && \
     uv pip install numpy pandas requests
 
-# --- 安全配置 ---
-# ✅ 只覆盖 /etc/n8n-task-runners.json（按官方方式）
-COPY n8n-task-runners.json /etc/n8n-task-runners.json
-RUN chmod 0644 /etc/n8n-task-runners.json
+# 不建议在这里覆盖 allowlist 配置，应该下载官方的配置后修改参数，再通过持久化文件覆盖
 
 USER runner
