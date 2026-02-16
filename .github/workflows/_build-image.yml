@@ -85,7 +85,6 @@ on:
         type: string
         default: ""
 
-      # ✅ 更现代/标准/安全：SBOM & Provenance
       enable_provenance:
         required: false
         type: boolean
@@ -157,7 +156,7 @@ jobs:
 
           elif [ "${MODE}" = "tag" ]; then
             if [ -z "${{ inputs.upstream_tag }}" ]; then
-              echo "错误：version_source=tag 时，必须提供 upstream_tag（如 latest/base）" >&2
+              echo "错误：version_source=tag 时，必须提供 upstream_tag（如 latest/base/noble）" >&2
               exit 1
             fi
             UP_TAG="${{ inputs.upstream_tag }}"
@@ -213,7 +212,6 @@ jobs:
           CTX="$( (find "${CONTEXT}" -type f -print0 | sort -z | xargs -0 sha256sum) \
                 | sha256sum | awk '{print $1}' | cut -c1-12 )"
           echo "ctx=${CTX}" >> "$GITHUB_OUTPUT"
-          echo "📦 本地上下文短哈希: ${CTX}"
 
       - name: 生成 Build Key（short_digest + ctx）
         if: steps.upstream.outputs.upstream_available == 'true'
@@ -224,7 +222,6 @@ jobs:
           CTX="${{ steps.ctx.outputs.ctx }}"
           BUILD_KEY="${UP_SHORT}-${CTX}"
           echo "build_key=${BUILD_KEY}" >> "$GITHUB_OUTPUT"
-          echo "🔑 Build Key: ${BUILD_KEY}"
 
       - name: 检查 build-<key> 是否已存在（避免重复构建）
         if: steps.upstream.outputs.upstream_available == 'true'
@@ -233,15 +230,10 @@ jobs:
           set -euo pipefail
           TARGET="ghcr.io/${{ github.repository_owner }}/${{ inputs.image_name }}"
           IMG="${TARGET}:build-${{ steps.key.outputs.build_key }}"
-
-          echo "正在检查镜像: ${IMG}"
-
           if docker manifest inspect "${IMG}" > /dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "🎉 已存在（同 upstream + 同本地上下文），跳过构建"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "🚀 不存在，准备构建"
           fi
 
       - name: 决策：是否需要构建
@@ -252,7 +244,6 @@ jobs:
             echo "should_build=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
           if [ "${{ steps.check.outputs.exists }}" = "true" ]; then
             echo "should_build=false" >> "$GITHUB_OUTPUT"
           else
@@ -314,18 +305,14 @@ jobs:
         id: args
         run: |
           set -euo pipefail
-
           OUT=""
-
           if [ -n "${{ inputs.version_arg_name }}" ]; then
             OUT="${OUT}${{ inputs.version_arg_name }}=${{ steps.meta.outputs.version }}"$'\n'
           fi
-
           EXTRA="${{ inputs.extra_build_args }}"
           if [ -n "${EXTRA}" ]; then
             OUT="${OUT}${EXTRA}"$'\n'
           fi
-
           echo "build_args<<EOF" >> "$GITHUB_OUTPUT"
           printf '%s' "${OUT}" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
@@ -351,13 +338,3 @@ jobs:
           sbom: ${{ inputs.enable_sbom }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: 结束（跳过原因提示）
-        if: steps.decide.outputs.should_build != 'true'
-        run: |
-          set -euo pipefail
-          if [ "${{ steps.upstream.outputs.upstream_available }}" != "true" ]; then
-            echo "未构建：上游镜像尚未同步或不可用（${{ steps.meta.outputs.upstream_ref }}）"
-          else
-            echo "未构建：build-${{ steps.key.outputs.build_key }} 已存在（同 upstream + 同本地上下文）"
-          fi
