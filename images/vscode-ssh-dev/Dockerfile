@@ -1,62 +1,42 @@
-# Containerfile
-FROM docker.io/ubuntu:24.04
+FROM lscr.io/linuxserver/baseimage-ubuntu:noble
 
-# 避免交互式安装时的卡顿
+LABEL org.opencontainers.image.title="vscode-ssh-dev"
+LABEL org.opencontainers.image.description="Ubuntu (LSIO baseimage) + OpenSSH for VS Code Remote-SSH dev server"
+LABEL org.opencontainers.image.licenses="MIT"
+
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 1. 安装基础包 (保留原来的)
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-server \
+    openssh-client \
     sudo \
-    curl \
     git \
+    curl \
+    wget \
     vim \
     nano \
-    locales \
-    udev \
-    iputils-ping \
-    net-tools \
+    htop \
+    sqlite3 \
+    libsqlite3-dev \
+    build-essential \
+    gdb \
+    cmake \
+    python3 \
+    python3-pip \
+    python3-venv \
+    ca-certificates \
+    tar \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. 配置 SSH 服务
-RUN mkdir /run/sshd
+# 将 abc 用户家目录指派给 /config（你原本的关键思路）
+RUN usermod -d /config abc && \
+    usermod -s /bin/bash abc
 
-# 【关键修改】允许 Root 登录
-# 修改 sshd_config 允许 root 使用密码或密钥登录
-RUN sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-# 允许密码登录 (调试用，建议后期关掉)
-RUN sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+RUN mkdir -p /var/run/sshd && chmod 0755 /var/run/sshd
 
-# 【关键修改】修复 PAM 限制
-# 这一步非常重要！默认 PAM 配置可能会阻止 Root 在容器内登录，或者导致会话立即退出
-RUN sed -i 's@session\s*required\s*pam_loginuid.so@session optional pam_loginuid.so@g' /etc/pam.d/sshd
+COPY root /
 
-# 3. 设置 Root 密码
-# 设置一个默认密码，方便首次登录
-RUN echo 'root:rockchip' | chpasswd
+RUN chmod +x /etc/cont-init.d/40-configure-ssh && \
+    chmod +x /etc/services.d/openssh/run
 
-# 4. 设置 Locale (解决终端乱码)
-RUN locale-gen en_US.UTF-8
-ENV LANG en_US.UTF-8
-ENV LANGUAGE en_US:en
-ENV LC_ALL en_US.UTF-8
-
-# 5. 配置 SSH 密钥目录
-# 为 Root 准备 .ssh 目录
-RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh
-# 【核心修复】将 root 加入 nogroup (GID 65534)
-# 这样 SSH 登录时，PAM 读取 /etc/group 就会保留这个组权限
-RUN usermod -aG nogroup root
-# 也可以顺手把 video/render 加进去，虽然在 rootless 映射下 nogroup 才是起作用的那个
-RUN usermod -aG video,render root
-
-# 解除 SSH 登录后的内存锁定限制
-# 如果不加这几行，SSH 登录后的 ulimit -l 只有 64KB，NPU 必挂
-RUN echo "root soft memlock unlimited" >> /etc/security/limits.conf && \
-    echo "root hard memlock unlimited" >> /etc/security/limits.conf && \
-    echo "root soft stack unlimited" >> /etc/security/limits.conf && \
-    echo "root hard stack unlimited" >> /etc/security/limits.conf
-
-# 6. 启动脚本
-EXPOSE 22
-CMD ["/usr/sbin/sshd", "-D"]
+EXPOSE 2222

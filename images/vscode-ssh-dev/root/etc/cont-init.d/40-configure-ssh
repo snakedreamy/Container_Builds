@@ -1,0 +1,166 @@
+#!/usr/bin/with-contenv bash
+# Ubuntu SSH Dev Server init (LSIO style)
+
+USER_NAME="${USER_NAME:-abc}"
+HOME_DIR="/config"
+
+SSH_DIR="${HOME_DIR}/.ssh"
+AUTH_KEYS="${SSH_DIR}/authorized_keys"
+
+PERSIST_KEYS_DIR="${HOME_DIR}/ssh_host_keys"
+RUNTIME_DIR="/etc/ssh"
+
+# 安全默认：建议 key 登录；如需密码再开
+PASSWORD_ACCESS="${PASSWORD_ACCESS:-false}"
+SUDO_ACCESS="${SUDO_ACCESS:-false}"
+LOG_STDOUT="${LOG_STDOUT:-false}"
+
+USER_PASSWORD="${USER_PASSWORD:-}"
+USER_PASSWORD_FILE="${USER_PASSWORD_FILE:-}"
+
+PUBLIC_KEY="${PUBLIC_KEY:-}"
+PUBLIC_KEY_FILE="${PUBLIC_KEY_FILE:-}"
+PUBLIC_KEY_DIR="${PUBLIC_KEY_DIR:-}"
+PUBLIC_KEY_URL="${PUBLIC_KEY_URL:-}"
+
+echo ">> [Init] Configuring SSH environment..."
+
+# 1) 目录准备
+mkdir -p "${SSH_DIR}" "${PERSIST_KEYS_DIR}"
+chown "${USER_NAME}:${USER_NAME}" "${HOME_DIR}" "${SSH_DIR}"
+chmod 700 "${SSH_DIR}"
+chmod 700 "${PERSIST_KEYS_DIR}"
+
+# 2) Host Keys：生成/复用（持久化到 /config/ssh_host_keys）
+for type in rsa ecdsa ed25519; do
+  key_name="ssh_host_${type}_key"
+  key_path="${PERSIST_KEYS_DIR}/${key_name}"
+
+  if [ ! -f "${key_path}" ]; then
+    echo ">> [Key] Generating ${type} host key..."
+    rm -f "${key_path}" "${key_path}.pub"
+    if [ "${type}" = "rsa" ]; then
+      ssh-keygen -t rsa -b 4096 -f "${key_path}" -N ""
+    else
+      ssh-keygen -t "${type}" -f "${key_path}" -N ""
+    fi
+  else
+    echo ">> [Key] Reusing ${type} host key..."
+  fi
+
+  chown root:root "${key_path}" "${key_path}.pub"
+  chmod 600 "${key_path}"
+  chmod 644 "${key_path}.pub"
+
+  # 链接到 /etc/ssh（OpenSSH 期望的默认路径）
+  ln -sf "${key_path}" "${RUNTIME_DIR}/${key_name}"
+  ln -sf "${key_path}.pub" "${RUNTIME_DIR}/${key_name}.pub"
+done
+
+# 3) 使用 sshd_config.d（更 Ubuntu 标准），避免反复 sed 主配置
+mkdir -p /etc/ssh/sshd_config.d
+DROPIN="/etc/ssh/sshd_config.d/99-vscode-ssh-dev.conf"
+
+cat > "${DROPIN}" <<EOF
+Port 2222
+PermitRootLogin no
+PubkeyAuthentication yes
+AuthorizedKeysFile ${AUTH_KEYS}
+Subsystem sftp internal-sftp
+EOF
+
+if [ "${LOG_STDOUT}" = "true" ]; then
+  # sshd -e 已经会输出到 stderr；这里可额外设置 LogLevel
+  echo "LogLevel INFO" >> "${DROPIN}"
+fi
+
+if [ "${PASSWORD_ACCESS}" = "true" ]; then
+  echo "PasswordAuthentication yes" >> "${DROPIN}"
+else
+  echo "PasswordAuthentication no" >> "${DROPIN}"
+fi
+
+# 4) 账号密码（可选）
+FINAL_PASSWORD=""
+if [ -n "${USER_PASSWORD_FILE}" ] && [ -f "${USER_PASSWORD_FILE}" ]; then
+  FINAL_PASSWORD="$(cat "${USER_PASSWORD_FILE}")"
+elif [ -n "${USER_PASSWORD}" ]; then
+  FINAL_PASSWORD="${USER_PASSWORD}"
+fi
+
+if [ -n "${FINAL_PASSWORD}" ]; then
+  echo ">> [Auth] Updating password for user ${USER_NAME}..."
+  echo "${USER_NAME}:${FINAL_PASSWORD}" | chpasswd
+else
+  echo ">> [Auth] No password provided."
+fi
+
+# 5) sudo（可选）
+if [ "${SUDO_ACCESS}" = "true" ]; then
+  echo ">> [Auth] Enabling SUDO access..."
+  echo "${USER_NAME} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${USER_NAME}"
+else
+  rm -f "/etc/sudoers.d/${USER_NAME}"
+fi
+
+# 6) 公钥注入（对齐 LSIO openssh-server 的常用变量）
+touch "${AUTH_KEYS}"
+chown "${USER_NAME}:${USER_NAME}" "${AUTH_KEYS}"
+chmod 600 "${AUTH_KEYS}"
+
+add_key() {
+  local key="$1"
+  [ -z "${key}" ] && return 0
+  grep -qF "${key}" "${AUTH_KEYS}" 2>/dev/null || echo "${key}" >> "${AUTH_KEYS}"
+}
+
+# PUBLIC_KEY：直接字符串
+if [ -n "${PUBLIC_KEY}" ]; then
+  echo ">> [Key] Adding PUBLIC_KEY..."
+  add_key "${PUBLIC_KEY}"
+fi
+
+# PUBLIC_KEY_FILE：文件内容
+if [ -n "${PUBLIC_KEY_FILE}" ] && [ -f "${PUBLIC_KEY_FILE}" ]; then
+  echo ">> [Key] Adding PUBLIC_KEY_FILE..."
+  while IFS= read -r line; do add_key "${line}"; done < "${PUBLIC_KEY_FILE}"
+fi
+
+# PUBLIC_KEY_DIR：目录下所有 *.pub
+if [ -n "${PUBLIC_KEY_DIR}" ] && [ -d "${PUBLIC_KEY_DIR}" ]; then
+  echo ">> [Key] Adding PUBLIC_KEY_DIR..."
+  find "${PUBLIC_KEY_DIR}" -maxdepth 1 -type f -name "*.pub" -print0 | while IFS= read -r -d '' f; do
+    while IFS= read -r line; do add_key "${line}"; done < "${f}"
+  done
+fi
+
+# PUBLIC_KEY_URL：拉取（例如 GitHub .keys）
+if [ -n "${PUBLIC_KEY_URL}" ]; then
+  echo ">> [Key] Fetching keys from URL..."
+  curl -fsSL --connect-timeout 10 "${PUBLIC_KEY_URL}" | while IFS= read -r line; do add_key "${line}"; done || \
+    echo ">> [Warn] Failed to fetch keys."
+fi
+
+# 7) .bashrc 修复（你原本的“防 shell noise/缺文件”思路保留）
+BASHRC="${HOME_DIR}/.bashrc"
+if [ ! -f "${BASHRC}" ]; then
+  echo ">> [Env] Creating default .bashrc..."
+  if [ -f "/etc/skel/.bashrc" ]; then
+    cp "/etc/skel/.bashrc" "${BASHRC}"
+  else
+    echo "export TERM=xterm-256color" > "${BASHRC}"
+    echo "alias ll='ls -alF'" >> "${BASHRC}"
+  fi
+  chown "${USER_NAME}:${USER_NAME}" "${BASHRC}"
+fi
+
+if grep -q "PS1=" "${BASHRC}" 2>/dev/null; then
+  if ! grep -q "\[\[ \$- != \*i\* \]\]" "${BASHRC}" 2>/dev/null; then
+    sed -i '1s/^/[[ $- != *i* ]] \&\& return\n/' "${BASHRC}"
+  fi
+fi
+
+touch "${HOME_DIR}/.hushlogin"
+chown "${USER_NAME}:${USER_NAME}" "${HOME_DIR}/.hushlogin"
+
+echo ">> [Done] SSH configured on port 2222."
