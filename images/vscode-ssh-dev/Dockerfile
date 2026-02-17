@@ -37,7 +37,7 @@ RUN groupadd --gid $USER_GID $USERNAME \
 
 # 4. 把用户加入 video/render 组，以便访问 /dev/dri (GPU)
 # Rockchip 的 NPU/GPU 权限通常需要 render 或 video 组
-RUN usermod -aG video,render,plugdev $USERNAME
+RUN usermod -aG video,render,plugdev,nogroup $USERNAME
 
 # 5. 设置 Locale (解决终端乱码)
 RUN locale-gen en_US.UTF-8
