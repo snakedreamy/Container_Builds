@@ -50,6 +50,13 @@ RUN usermod -aG nogroup root
 # 也可以顺手把 video/render 加进去，虽然在 rootless 映射下 nogroup 才是起作用的那个
 RUN usermod -aG video,render root
 
+# 解除 SSH 登录后的内存锁定限制
+# 如果不加这几行，SSH 登录后的 ulimit -l 只有 64KB，NPU 必挂
+RUN echo "root soft memlock unlimited" >> /etc/security/limits.conf && \
+    echo "root hard memlock unlimited" >> /etc/security/limits.conf && \
+    echo "root soft stack unlimited" >> /etc/security/limits.conf && \
+    echo "root hard stack unlimited" >> /etc/security/limits.conf
+
 # 6. 启动脚本
 EXPOSE 22
 CMD ["/usr/sbin/sshd", "-D"]
