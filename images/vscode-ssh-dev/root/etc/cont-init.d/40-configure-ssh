@@ -25,9 +25,24 @@ PUBLIC_KEY_URL="${PUBLIC_KEY_URL:-}"
 
 echo ">> [Init] Configuring SSH environment..."
 
+# --- [Fix] 统一使用“数值 UID/GID”做 chown，避免 abc UID 在启动过程中从 911 -> 1000 变化导致 .ssh 属主漂移 ---
+TARGET_UID="${PUID:-}"
+TARGET_GID="${PGID:-}"
+if [ -z "${TARGET_UID}" ]; then
+  TARGET_UID="$(id -u "${USER_NAME}" 2>/dev/null || echo 0)"
+fi
+if [ -z "${TARGET_GID}" ]; then
+  TARGET_GID="$(id -g "${USER_NAME}" 2>/dev/null || echo 0)"
+fi
+
 # 1) 目录准备
 mkdir -p "${SSH_DIR}" "${PERSIST_KEYS_DIR}"
-chown "${USER_NAME}:${USER_NAME}" "${HOME_DIR}" "${SSH_DIR}"
+
+# --- [Fix] /config 不能 group 可写，否则 sshd StrictModes 可能拒绝登录（bad ownership or modes） ---
+chmod 755 "${HOME_DIR}"
+
+# --- [Fix] 用数值 UID/GID chown，避免 chown abc:abc 时 abc 仍是 911 导致 .ssh 变成 911:xxxx ---
+chown "${TARGET_UID}:${TARGET_GID}" "${HOME_DIR}" "${SSH_DIR}"
 chmod 700 "${SSH_DIR}"
 chmod 700 "${PERSIST_KEYS_DIR}"
 
@@ -105,7 +120,8 @@ fi
 
 # 6) 公钥注入（对齐 LSIO openssh-server 的常用变量）
 touch "${AUTH_KEYS}"
-chown "${USER_NAME}:${USER_NAME}" "${AUTH_KEYS}"
+# --- [Fix] authorized_keys 也用数值 UID/GID chown，避免属主漂移 ---
+chown "${TARGET_UID}:${TARGET_GID}" "${AUTH_KEYS}"
 chmod 600 "${AUTH_KEYS}"
 
 add_key() {
@@ -141,6 +157,11 @@ if [ -n "${PUBLIC_KEY_URL}" ]; then
     echo ">> [Warn] Failed to fetch keys."
 fi
 
+# --- [Fix] 最终兜底：确保 .ssh / authorized_keys 的属主与权限正确（避免中途创建导致漂移） ---
+chown -R "${TARGET_UID}:${TARGET_GID}" "${SSH_DIR}"
+chmod 700 "${SSH_DIR}"
+chmod 600 "${AUTH_KEYS}"
+
 # 7) .bashrc 修复（你原本的“防 shell noise/缺文件”思路保留）
 BASHRC="${HOME_DIR}/.bashrc"
 if [ ! -f "${BASHRC}" ]; then
@@ -151,7 +172,8 @@ if [ ! -f "${BASHRC}" ]; then
     echo "export TERM=xterm-256color" > "${BASHRC}"
     echo "alias ll='ls -alF'" >> "${BASHRC}"
   fi
-  chown "${USER_NAME}:${USER_NAME}" "${BASHRC}"
+  # --- [Fix] 这里也改为数值 UID/GID ---
+  chown "${TARGET_UID}:${TARGET_GID}" "${BASHRC}"
 fi
 
 if grep -q "PS1=" "${BASHRC}" 2>/dev/null; then
@@ -161,6 +183,7 @@ if grep -q "PS1=" "${BASHRC}" 2>/dev/null; then
 fi
 
 touch "${HOME_DIR}/.hushlogin"
-chown "${USER_NAME}:${USER_NAME}" "${HOME_DIR}/.hushlogin"
+# --- [Fix] 这里也改为数值 UID/GID ---
+chown "${TARGET_UID}:${TARGET_GID}" "${HOME_DIR}/.hushlogin"
 
 echo ">> [Done] SSH configured on port 2222."
