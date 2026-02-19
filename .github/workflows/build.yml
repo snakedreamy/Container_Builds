@@ -49,25 +49,21 @@ jobs:
       - uses: actions/checkout@v4
 
       # push 场景：检测哪些 images/<name> 目录发生变更（paths-filter 输出 true/false）
+      # 目前有 BUG ，README.md文件被修改也会触发更新
       - name: 计算哪些镜像目录发生了变更（push 场景）
         id: filter
         uses: dorny/paths-filter@v3
         if: github.event_name == 'push'
         with:
-          predicate-quantifier: 'every'
           filters: |
             n8n:
               - "images/n8n/**"
-              - "!images/n8n/README.md"
             n8n-runners:
               - "images/n8n-runners/**"
-              - "!images/n8n-runners/README.md"
             vscode-ssh-dev:
               - "images/vscode-ssh-dev/**"
-              - "!images/vscode-ssh-dev/README.md"
             webtop:
               - "images/webtop/**"
-              - "!images/webtop/README.md"
 
       # 生成 matrix：
       # - schedule：按 cron 分流（fast/weekly）
