@@ -1,0 +1,210 @@
+#!/usr/bin/with-contenv bash
+# Bootstrap Node global tools (persisted in /config)
+# - Installs pinned tools deterministically when needed
+# - Installs missing unpinned tools when needed
+# - Auto-updates unpinned tools every N days (default 7)
+# - Never blocks container startup if npm registry/network is flaky
+
+set -u
+set -o pipefail
+
+USER_NAME="${USER_NAME:-abc}"
+HOME_DIR="/config"
+
+PREFIX="${NPM_CONFIG_PREFIX:-/config/.npm-global}"
+NPM_CACHE="${NPM_CONFIG_CACHE:-/config/.npm}"
+MANIFEST="/opt/vscode-ssh-dev/manifests/node-global-tools.txt"
+
+BOOTSTRAP_DIR="${HOME_DIR}/.bootstrap"
+STATE_FILE="${BOOTSTRAP_DIR}/state.json"
+LOCK_FILE="${BOOTSTRAP_DIR}/lock"
+
+AUTO_UPDATE="${AUTO_UPDATE:-true}"
+INTERVAL_DAYS="${NODE_TOOLS_UPDATE_INTERVAL_DAYS:-7}"
+
+echo ">> [Init] Bootstrapping Node global tools..."
+
+if ! command -v npm >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+  echo ">> [Init] node/npm not found; skipping Node tools bootstrap."
+  exit 0
+fi
+
+# Ensure dirs exist (do not chown recursively; keep it fast)
+mkdir -p "${PREFIX}" "${NPM_CACHE}" "${BOOTSTRAP_DIR}"
+chown "${USER_NAME}:${USER_NAME}" "${PREFIX}" "${NPM_CACHE}" "${BOOTSTRAP_DIR}" || true
+chmod 755 "${PREFIX}" "${BOOTSTRAP_DIR}" || true
+
+# Ensure npm uses /config prefix even in non-interactive exec
+NPMRC="${HOME_DIR}/.npmrc"
+touch "${NPMRC}"
+chown "${USER_NAME}:${USER_NAME}" "${NPMRC}" || true
+if grep -qE '^prefix=' "${NPMRC}" 2>/dev/null; then
+  sed -i "s|^prefix=.*$|prefix=${PREFIX}|" "${NPMRC}" || true
+else
+  echo "prefix=${PREFIX}" >> "${NPMRC}"
+fi
+if grep -qE '^cache=' "${NPMRC}" 2>/dev/null; then
+  sed -i "s|^cache=.*$|cache=${NPM_CACHE}|" "${NPMRC}" || true
+else
+  echo "cache=${NPM_CACHE}" >> "${NPMRC}"
+fi
+
+if [ ! -f "${MANIFEST}" ]; then
+  echo ">> [Init] No manifest at ${MANIFEST}; skipping."
+  exit 0
+fi
+
+# Lock (avoid double install when multiple cont-init scripts overlap)
+touch "${LOCK_FILE}"
+chown "${USER_NAME}:${USER_NAME}" "${LOCK_FILE}" || true
+exec 9>"${LOCK_FILE}"
+flock 9
+
+# Read manifest
+mapfile -t PKGS < <(grep -vE '^\s*($|#)' "${MANIFEST}" | sed 's/^\s*//; s/\s*$//')
+
+if [ "${#PKGS[@]}" -eq 0 ]; then
+  echo ">> [Init] Manifest is empty; nothing to do."
+  exit 0
+fi
+
+MANIFEST_HASH="$(sha256sum "${MANIFEST}" | awk '{print $1}')"
+NODE_MAJOR="$(node -p "process.versions.node.split('.')[0]")"
+NOW="$(date +%s)"
+
+export STATE_FILE MANIFEST_HASH NODE_MAJOR AUTO_UPDATE INTERVAL_DAYS NOW
+
+# Decide whether to sync/update based on state.json
+eval "$(
+python3 - <<'PY'
+import json, os, time
+from pathlib import Path
+
+state_path = Path(os.environ["STATE_FILE"])
+manifest_hash = os.environ["MANIFEST_HASH"]
+node_major = int(os.environ["NODE_MAJOR"])
+auto_update = os.environ.get("AUTO_UPDATE","true").lower() == "true"
+interval_days = int(os.environ.get("INTERVAL_DAYS","7"))
+now = int(os.environ["NOW"])
+
+state = {}
+need_sync = True
+need_update = False
+
+if state_path.exists():
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        need_sync = (int(state.get("node_major",-1)) != node_major) or (state.get("tools_manifest_hash","") != manifest_hash)
+    except Exception:
+        state = {}
+        need_sync = True
+
+last_update = int(state.get("last_update_time", 0) or 0)
+if auto_update and (now - last_update >= interval_days * 86400):
+    need_update = True
+
+print(f'DO_SYNC={"true" if need_sync else "false"}')
+print(f'DO_UPDATE={"true" if need_update else "false"}')
+PY
+)"
+
+# Run npm as the normal user to avoid root-owned /config artifacts
+npm_u() {
+  sudo -u "${USER_NAME}" -H env \
+    NPM_CONFIG_PREFIX="${PREFIX}" \
+    NPM_CONFIG_CACHE="${NPM_CACHE}" \
+    PATH="${PREFIX}/bin:${PATH}" \
+    npm "$@"
+}
+
+is_pinned() {
+  local pkg="$1"
+  # scoped pinned: @scope/name@version
+  if [[ "${pkg}" == @*/*@* ]]; then return 0; fi
+  # unscoped pinned: name@version (and name doesn't start with @)
+  if [[ "${pkg}" != @* && "${pkg}" == *@* ]]; then return 0; fi
+  return 1
+}
+
+SYNC_OK=true
+UPDATE_OK=true
+
+if [ "${DO_SYNC}" = "true" ]; then
+  echo ">> [Node] Syncing global tools (first run / manifest changed / Node major changed)..."
+  for pkg in "${PKGS[@]}"; do
+    [ -z "${pkg}" ] && continue
+
+    if is_pinned "${pkg}"; then
+      echo ">> [Node] Ensuring pinned: ${pkg}"
+      if ! npm_u install -g "${pkg}" >/dev/null 2>&1; then
+        echo ">> [Warn] Failed to install pinned ${pkg}"
+        SYNC_OK=false
+      fi
+    else
+      if npm_u ls -g --depth=0 "${pkg}" >/dev/null 2>&1; then
+        echo ">> [Node] Already installed: ${pkg}"
+      else
+        echo ">> [Node] Installing: ${pkg}"
+        if ! npm_u install -g "${pkg}" >/dev/null 2>&1; then
+          echo ">> [Warn] Failed to install ${pkg}"
+          SYNC_OK=false
+        fi
+      fi
+    fi
+  done
+fi
+
+if [ "${DO_UPDATE}" = "true" ]; then
+  echo ">> [Node] Auto-updating unpinned tools (every ${INTERVAL_DAYS} days)..."
+  for pkg in "${PKGS[@]}"; do
+    [ -z "${pkg}" ] && continue
+    if is_pinned "${pkg}"; then
+      continue
+    fi
+    echo ">> [Node] Updating: ${pkg}"
+    if ! npm_u install -g "${pkg}@latest" >/dev/null 2>&1; then
+      echo ">> [Warn] Failed to update ${pkg}"
+      UPDATE_OK=false
+    fi
+  done
+fi
+
+# Update state.json (only mark sync/update as done when they succeeded)
+export SYNC_OK UPDATE_OK
+python3 - <<'PY'
+import json, os
+from pathlib import Path
+
+state_path = Path(os.environ["STATE_FILE"])
+manifest_hash = os.environ["MANIFEST_HASH"]
+node_major = int(os.environ["NODE_MAJOR"])
+now = int(os.environ["NOW"])
+
+do_sync = os.environ.get("DO_SYNC") == "true"
+do_update = os.environ.get("DO_UPDATE") == "true"
+sync_ok = os.environ.get("SYNC_OK") == "true"
+update_ok = os.environ.get("UPDATE_OK") == "true"
+
+state = {}
+if state_path.exists():
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception:
+        state = {}
+
+state["last_run_time"] = now
+
+if do_sync and sync_ok:
+    state["node_major"] = node_major
+    state["tools_manifest_hash"] = manifest_hash
+    state["last_sync_time"] = now
+
+if do_update and update_ok:
+    state["last_update_time"] = now
+
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
+
+echo ">> [Done] Node tools bootstrap finished (sync=${DO_SYNC}/${SYNC_OK}, update=${DO_UPDATE}/${UPDATE_OK})."
+exit 0
