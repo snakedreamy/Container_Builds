@@ -22,6 +22,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 #    - python3 / python3-venv / python3-pip / python-is-python3
 #    - xz-utils：tar.xz 解压必备（Node 官方包为 .tar.xz）
 #    - build-essential / cmake / gdb：编译/调试常用
+#    - fonts-noto-cjk / fonts-wqy-zenhei / fonts-wqy-microhei：中文乱码问题修复
 # ============================================================
 RUN apt-get update && apt-get install -y --no-install-recommends \
     sudo \
@@ -44,6 +45,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tar \
     xz-utils \
+    fonts-noto-cjk \
+    fonts-wqy-zenhei \
+    fonts-wqy-microhei \
   && rm -rf /var/lib/apt/lists/*
 
 # ============================================================
