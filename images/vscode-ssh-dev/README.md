@@ -146,7 +146,7 @@ curl -s http://127.0.0.1:8000/health | python -m json.tool
 
 ---
 
-####（可选但强烈建议）加开发依赖：ruff + pytest
+#### （可选但强烈建议）加开发依赖：ruff + pytest
 
 ruff 可以同时当 linter+formatter（非常省事）：
 
