@@ -4,8 +4,24 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # 先装解压/下载所需的基础工具（xz-utils 是 tar.xz 的关键）
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
+    sudo \
+    git \
     curl \
+    wget \
+    vim \
+    nano \
+    htop \
+    iproute2 \
+    sqlite3 \
+    libsqlite3-dev \
+    build-essential \
+    gdb \
+    cmake \
+    python3 \
+    python3-venv \
+    python3-pip \
+    python-is-python3 \
+    ca-certificates \
     tar \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
@@ -30,6 +46,20 @@ RUN set -eux; \
     tar -xJf "${file}" -C /usr/local --strip-components=1; \
     rm -f "/tmp/${file}" /tmp/SHASUMS256.txt; \
     node --version; npm --version
+
+# Install uv (latest) without modifying shell rc files; place into /usr/local/bin
+RUN set -eux; \
+    curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh; \
+    install -m 0755 /root/.local/bin/uv /usr/local/bin/uv; \
+    if [ -f /root/.local/bin/uvx ]; then install -m 0755 /root/.local/bin/uvx /usr/local/bin/uvx; fi; \
+    rm -f /root/.local/bin/uv /root/.local/bin/uvx; \
+    uv --version
+
+# Persist-friendly defaults (no .bashrc required)
+ENV NPM_CONFIG_PREFIX=/config/.npm-global \
+    NPM_CONFIG_CACHE=/config/.npm \
+    UV_CACHE_DIR=/config/.cache/uv \
+    PIP_CACHE_DIR=/config/.cache/pip
 
 # npm 全局工具持久化到 /config（volume）
 ENV NPM_CONFIG_PREFIX=/config/.npm-global \
